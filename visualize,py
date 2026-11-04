@@ -1,0 +1,254 @@
+"""
+Generate publication-quality visualisations:
+  1. Skeleton overlays (GT vs. Baseline vs. Fine-tuned)
+  2. Training loss / val-px curves
+  3. Per-joint error bar chart
+  4. Heatmap attention maps
+
+Usage:
+    python visualize.py --checkpoint checkpoints/vitpose_B_mix_best.pt
+"""
+
+import argparse, glob, json, os, random
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from PIL import Image, ImageDraw
+
+from configs.default import *
+from models.vitpose import build_model
+from utils.keypoints import coco_to_3dsp
+from utils.heatmap import soft_argmax
+
+plt.rcParams.update({
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "figure.dpi": 150,
+    "savefig.bbox": "tight",
+})
+
+COLORS = [
+    "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+    "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#fabebe",
+    "#008080", "#e6beff", "#9a6324", "#fffac8", "#800000",
+    "#aaffc3", "#808000",
+]
+
+
+# ────────────────────────────────────────────────────
+# 1.  Skeleton overlay
+# ────────────────────────────────────────────────────
+def draw_skeleton(img, coords, title=""):
+    """Draw keypoints + edges on a PIL image, return PIL."""
+    draw = ImageDraw.Draw(img)
+    for i, (x, y) in enumerate(coords):
+        r = 4
+        draw.ellipse([x - r, y - r, x + r, y + r],
+                     fill=COLORS[i % len(COLORS)], outline="white")
+    for a, b in SKELETON_EDGES:
+        xa, ya = coords[a]
+        xb, yb = coords[b]
+        draw.line([xa, ya, xb, yb], fill="#00ff00", width=2)
+    return img
+
+
+def plot_qualitative(model_ft, model_base, processor, val_samples,
+                     n=6, save="assets/qualitative_results.png"):
+    fig, axes = plt.subplots(n, 3, figsize=(12, 4 * n))
+    fig.suptitle("Qualitative Comparison: Ground Truth vs Baseline vs Fine-tuned",
+                 fontsize=16, fontweight="bold")
+
+    for row, pp in enumerate(val_samples[:n]):
+        gt = json.load(open(pp))
+        ip = pp.replace("/posture/", "/img/").replace(".json", ".jpg")
+        img = Image.open(ip).convert("RGB")
+        W, H = img.size
+
+        # GT coords
+        gt_c = [(gt["keypoint_2d"][str(i)]["x"],
+                 gt["keypoint_2d"][str(i)]["y"]) for i in range(17)]
+
+        # Baseline
+        boxes = [[[0, 0, W, H]]]
+        inp   = processor(images=[img], boxes=boxes,
+                          return_tensors="pt").to("cuda")
+        with torch.no_grad():
+            out = model_base(**inp)
+        pred = processor.post_process_pose_estimation(
+            out, boxes=boxes)[0][0]["keypoints"].cpu().numpy()
+        base_c = coco_to_3dsp([tuple(p) for p in pred])
+
+        # Fine-tuned
+        arr = np.array(img.resize((INPUT_W, INPUT_H), Image.BILINEAR),
+                       dtype=np.float32) / 255.0
+        arr = (arr - np.array(MEAN)) / np.array(STD)
+        pv  = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float().to("cuda")
+        with torch.no_grad():
+            hm = model_ft(pixel_values=pv).heatmaps
+        ft_c = soft_argmax(hm)[0].cpu().numpy() * np.array([W, H])
+
+        for col, (coords, title) in enumerate(
+            [(gt_c, "Ground Truth"), (base_c, "COCO Baseline"),
+             (ft_c, "Fine-tuned (Ours)")]
+        ):
+            ax = axes[row, col]
+            ax.imshow(draw_skeleton(img.copy(), coords))
+            ax.set_title(title)
+            ax.axis("off")
+
+    plt.savefig(save)
+    plt.close()
+    print(f"Saved → {save}")
+
+
+# ────────────────────────────────────────────────────
+# 2.  Training curves
+# ────────────────────────────────────────────────────
+def plot_training_curves(history, save="assets/training_curves.png"):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+    epochs = range(1, len(history["train_loss"]) + 1)
+
+    ax1.plot(epochs, history["train_loss"], "o-", color="#4363d8",
+             label="Train Loss")
+    ax1.set_xlabel("Epoch"); ax1.set_ylabel("MSE Loss")
+    ax1.set_title("Training Loss"); ax1.grid(alpha=0.3)
+
+    ax2.plot(epochs, history["val_px"], "s-", color="#e6194b",
+             label="Val Px Error")
+    ax2.axhline(y=min(history["val_px"]), color="gray", ls="--",
+                label=f"Best = {min(history['val_px']):.2f}")
+    ax2.set_xlabel("Epoch"); ax2.set_ylabel("Mean Pixel Error")
+    ax2.set_title("Validation Error"); ax2.legend(); ax2.grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save)
+    plt.close()
+    print(f"Saved → {save}")
+
+
+# ────────────────────────────────────────────────────
+# 3.  Per-joint error bar chart
+# ────────────────────────────────────────────────────
+def plot_per_joint(model_ft, model_base, processor, val_samples,
+                   save="assets/per_joint_error.png"):
+    joint_errs_base = {i: [] for i in EXACT_JOINTS}
+    joint_errs_ft   = {i: [] for i in EXACT_JOINTS}
+
+    for pp in val_samples:
+        gt = json.load(open(pp))
+        ip = pp.replace("/posture/", "/img/").replace(".json", ".jpg")
+        if not os.path.exists(ip):
+            continue
+        img = Image.open(ip).convert("RGB")
+        W, H = img.size
+
+        # baseline
+        boxes = [[[0, 0, W, H]]]
+        inp   = processor(images=[img], boxes=boxes,
+                          return_tensors="pt").to("cuda")
+        with torch.no_grad():
+            out = model_base(**inp)
+        pred = processor.post_process_pose_estimation(
+            out, boxes=boxes)[0][0]["keypoints"].cpu().numpy()
+        base_c = coco_to_3dsp([tuple(p) for p in pred])
+
+        # fine-tuned
+        arr = np.array(img.resize((INPUT_W, INPUT_H), Image.BILINEAR),
+                       dtype=np.float32) / 255.0
+        arr = (arr - np.array(MEAN)) / np.array(STD)
+        pv  = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float().to("cuda")
+        with torch.no_grad():
+            hm = model_ft(pixel_values=pv).heatmaps
+        ft_c = soft_argmax(hm)[0].cpu().numpy() * np.array([W, H])
+
+        for i in EXACT_JOINTS:
+            gx, gy = gt["keypoint_2d"][str(i)]["x"], gt["keypoint_2d"][str(i)]["y"]
+            joint_errs_base[i].append(np.hypot(base_c[i][0]-gx, base_c[i][1]-gy))
+            joint_errs_ft[i].append(np.hypot(ft_c[i][0]-gx, ft_c[i][1]-gy))
+
+    names = [JOINT_NAMES[i] for i in EXACT_JOINTS]
+    x     = np.arange(len(EXACT_JOINTS))
+    w     = 0.35
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.bar(x - w/2, [np.mean(joint_errs_base[i]) for i in EXACT_JOINTS],
+           w, label="COCO Baseline", color="#4363d8", alpha=0.85)
+    ax.bar(x + w/2, [np.mean(joint_errs_ft[i]) for i in EXACT_JOINTS],
+           w, label="Fine-tuned (Ours)", color="#e6194b", alpha=0.85)
+    ax.set_xticks(x); ax.set_xticklabels(names, rotation=45, ha="right")
+    ax.set_ylabel("Mean L2 Error (px)")
+    ax.set_title("Per-Joint Localisation Error")
+    ax.legend(); ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save)
+    plt.close()
+    print(f"Saved → {save}")
+
+
+# ────────────────────────────────────────────────────
+# 4.  Heatmap visualisation
+# ────────────────────────────────────────────────────
+def plot_heatmaps(model_ft, val_samples, n=4,
+                  save="assets/heatmap_vis.png"):
+    fig, axes = plt.subplots(n, 5, figsize=(15, 4 * n))
+    fig.suptitle("Predicted Heatmaps (selected joints)",
+                 fontsize=16, fontweight="bold")
+    show_joints = [0, 5, 7, 8]  # nose, l_wrist, neck, mid_hip
+
+    for row, pp in enumerate(val_samples[:n]):
+        ip = pp.replace("/posture/", "/img/").replace(".json", ".jpg")
+        img = Image.open(ip).convert("RGB")
+
+        arr = np.array(img.resize((INPUT_W, INPUT_H), Image.BILINEAR),
+                       dtype=np.float32) / 255.0
+        arr = (arr - np.array(MEAN)) / np.array(STD)
+        pv  = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float().to("cuda")
+
+        with torch.no_grad():
+            hm = model_ft(pixel_values=pv).heatmaps  # (1,17,Hh,Ww)
+
+        axes[row, 0].imshow(img.resize((INPUT_W, INPUT_H)))
+        axes[row, 0].set_title("Input"); axes[row, 0].axis("off")
+
+        for col, j in enumerate(show_joints):
+            h = hm[0, j].cpu().numpy()
+            axes[row, col+1].imshow(h, cmap="inferno")
+            axes[row, col+1].set_title(JOINT_NAMES[j])
+            axes[row, col+1].axis("off")
+
+    plt.savefig(save)
+    plt.close()
+    print(f"Saved → {save}")
+
+
+# ────────────────────────────────────────────────────
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str,
+                        default=os.path.join(CHECKPOINT_DIR,
+                                             "vitpose_B_mix_best.pt"))
+    args = parser.parse_args()
+
+    os.makedirs(ASSET_DIR, exist_ok=True)
+
+    # load models
+    mf, _ = build_model(checkpoint=args.checkpoint, device="cuda"); mf.eval()
+    mb, proc = build_model(device="cuda"); mb.eval()
+
+    all_shots = sorted(glob.glob(
+        os.path.join(DSP_ROOT, "3dsp", "train", "*")))
+    random.seed(SEED); random.shuffle(all_shots)
+    val_samples = [pp for s in all_shots[:VAL_SHOTS]
+                   for pp in sorted(glob.glob(f"{s}/posture/*.json"))]
+
+    plot_qualitative(mf, mb, proc, val_samples)
+    plot_per_joint(mf, mb, proc, val_samples)
+    plot_heatmaps(mf, val_samples)
+
+    # For training curves, pass your recorded history dict:
+    # plot_training_curves(history)

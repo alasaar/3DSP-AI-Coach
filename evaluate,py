@@ -1,0 +1,115 @@
+"""
+Final evaluation – COCO-pretrained baseline vs. fine-tuned model
+on 400 held-out 3DSP validation frames (12 exact joints).
+
+Usage:
+    python evaluate.py --checkpoint checkpoints/vitpose_B_mix_best.pt
+"""
+
+import argparse
+import glob
+import json
+import os
+import random
+
+import numpy as np
+import torch
+from PIL import Image
+from tqdm import tqdm
+
+from configs.default import *
+from models.vitpose import build_model
+from utils.keypoints import coco_to_3dsp
+from utils.heatmap import soft_argmax
+
+
+def infer_finetuned(model, img: Image.Image) -> np.ndarray:
+    """Run the fine-tuned model on a single PIL image."""
+    W, H = img.size
+    arr  = np.array(img.resize((INPUT_W, INPUT_H), Image.BILINEAR),
+                    dtype=np.float32) / 255.0
+    arr  = (arr - np.array(MEAN)) / np.array(STD)
+    pv   = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).float().to("cuda")
+
+    with torch.no_grad():
+        hm = model(pixel_values=pv).heatmaps
+
+    coords = soft_argmax(hm)                       # (1, 17, 2) normalised
+    return coords[0].cpu().numpy() * np.array([W, H])
+
+
+def eval_model(model, tag, val_samples, use_processor, processor, remap):
+    errs = []
+    for pp in tqdm(val_samples, desc=tag):
+        gt = json.load(open(pp))
+        ip = pp.replace("/posture/", "/img/").replace(".json", ".jpg")
+        if not os.path.exists(ip):
+            continue
+        img = Image.open(ip).convert("RGB")
+        W, H = img.size
+
+        if use_processor:
+            boxes = [[[0, 0, W, H]]]
+            inp   = processor(images=[img], boxes=boxes,
+                              return_tensors="pt").to("cuda")
+            with torch.no_grad():
+                out = model(**inp)
+            pred = processor.post_process_pose_estimation(
+                out, boxes=boxes)[0][0]["keypoints"].cpu().numpy()
+            if pred.shape[0] != 17:
+                continue
+            coords = coco_to_3dsp([tuple(p) for p in pred]) if remap \
+                     else [tuple(p) for p in pred]
+        else:
+            coords = infer_finetuned(model, img)
+
+        for i in EXACT_JOINTS:
+            gx = gt["keypoint_2d"][str(i)]["x"]
+            gy = gt["keypoint_2d"][str(i)]["y"]
+            px, py = coords[i]
+            errs.append(np.hypot(gx - px, gy - py))
+
+    e = np.array(errs)
+    return e.mean(), np.median(e), len(e)
+
+
+def main(ckpt_path: str):
+    all_shots = sorted(glob.glob(
+        os.path.join(DSP_ROOT, "3dsp", "train", "*")))
+    random.seed(SEED)
+    random.shuffle(all_shots)
+    val_samples = [pp for s in all_shots[:VAL_SHOTS]
+                   for pp in sorted(glob.glob(f"{s}/posture/*.json"))]
+
+    # ---- baseline (COCO pretrained, HF processor pipeline) ----
+    mb, proc = build_model(device="cuda")
+    mb.eval()
+    b_mean, b_med, _ = eval_model(mb, "baseline", val_samples,
+                                  True, proc, True)
+
+    # ---- fine-tuned ----
+    mf, _ = build_model(checkpoint=ckpt_path, device="cuda")
+    mf.eval()
+    f_mean, f_med, _ = eval_model(mf, "fine-tuned", val_samples,
+                                  False, None, False)
+
+    print(f"\n{'='*52}")
+    print(f"  FINAL  ({len(val_samples)} val samples, "
+          f"{len(EXACT_JOINTS)} exact joints)")
+    print(f"{'='*52}")
+    print(f"{'':22s} mean L2   median L2")
+    print(f"{'COCO baseline':22s} {b_mean:6.2f}    {b_med:6.2f}")
+    print(f"{'Fine-tuned':22s} {f_mean:6.2f}    {f_med:6.2f}")
+    print(f"{'Improvement':22s} "
+          f"{(1-f_mean/b_mean)*100:5.1f}%    "
+          f"{(1-f_med/b_med)*100:5.1f}%")
+    print(f"{'='*52}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str,
+                        default=os.path.join(CHECKPOINT_DIR,
+                                             "vitpose_B_mix_best.pt"))
+    args = parser.parse_args()
+    main(args.checkpoint)

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model weights (too large for git)
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+
+# Datasets
+data/3D-Shot-Posture-Dataset/
+data/CrowdPose/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# HuggingFace cache
+.hf_cache/
