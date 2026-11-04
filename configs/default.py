@@ -500,7 +500,7 @@ SKELETON_EDGES: Tuple[Tuple[int, int], ...] = (
 # Visualization defaults
 # =====================================================================
 
-KEYPOINT_RADIUS = 4
+KEYPOINT_RADIUS = 3
 SKELETON_LINE_WIDTH = 2
 
 QUALITATIVE_NUM_SAMPLES = 4
@@ -513,7 +513,7 @@ HEATMAP_NUM_SAMPLES = 2
 #   10 head
 #   16 left_wrist
 #
-HEATMAP_DISPLAY_JOINTS: Tuple[int, ...] = (0, 9, 10, 16)
+HEATMAP_DISPLAY_JOINTS = (10, 16, 6, 0)
 
 HEATMAP_CMAP = "inferno"
 PLOT_DPI = 150
@@ -532,3 +532,28 @@ assert all(
 )
 assert len(EXACT_JOINTS) == 12
 assert set(EXACT_JOINTS).issubset(set(range(NUM_KEYPOINTS)))
+
+# =====================================================================
+# Visualisation palette (Okabe-Ito, colour-blind safe)
+# =====================================================================
+
+LIMBS: Tuple[Tuple[str, Tuple[Tuple[int, int], ...]], ...] = (
+    ("#F0E442", ((0, 7), (7, 8), (8, 9), (9, 10))),   # torso / head
+    ("#56B4E9", ((0, 1), (1, 2), (2, 3))),            # left leg
+    ("#D55E00", ((0, 4), (4, 5), (5, 6))),            # right leg
+    ("#CC79A7", ((8, 14), (14, 15), (15, 16))),       # left arm
+    ("#E69F00", ((8, 11), (11, 12), (12, 13))),       # right arm
+)
+
+KP_COLOR: Dict[int, str] = {
+    0: "#F0E442", 7: "#F0E442", 8: "#F0E442", 9: "#F0E442", 10: "#F0E442",
+    1: "#56B4E9", 2: "#56B4E9", 3: "#56B4E9",
+    4: "#D55E00", 5: "#D55E00", 6: "#D55E00",
+    14: "#CC79A7", 15: "#CC79A7", 16: "#CC79A7",
+    11: "#E69F00", 12: "#E69F00", 13: "#E69F00",
+}
+
+CHART_BLUE      = "#4C72B0"
+CHART_RED       = "#C44E52"
+REDUCTION_GREEN = "#2E7D32"
+STAR_ORANGE     = "#E69F00"

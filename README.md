@@ -22,8 +22,8 @@ This project fine-tunes **ViTPose-Base-Simple** on the domain-specific
 supplemented with **23,937** filtered in-the-wild samples from **CrowdPose**.
 A 3x oversampling strategy balances the scarce domain data against the larger
 general corpus. After 12 epochs on a Tesla T4, the model achieves a mean L2
-error of **3.59 px** (baseline: 6.59 px) across 400 held-out frames and 12
-exactly-matched joints.
+error of **3.59 px** (baseline: 6.59 px) and a median of **2.05 px**
+(baseline: 3.41 px) across 400 held-out frames and 12 exactly-matched joints.
 
 ---
 
@@ -52,7 +52,10 @@ INPUT (192 x 256 x 3, ImageNet-normalised)
 | Decoding | Soft-argmax, tau = 100 |
 
 Before fine-tuning, the 1x1 conv head is re-initialised (N(0, 0.01), zero
-bias) to remove COCO-layout bias.
+bias) to remove COCO-layout bias. The 17-keypoint 3DSP layout comprises the
+limb joints (hips, knees, ankles: 1-6; shoulders, elbows, wrists: 11-16) plus
+midline joints (pelvis, spine, shoulder centre, neck, head: 0, 7, 8, 9, 10),
+three of which are derived by spatial averaging during data preparation.
 
 ---
 
@@ -64,9 +67,11 @@ bias) to remove COCO-layout bias.
 | CrowdPose (filtered) | 23,937 | In-the-wild generalisation |
 | 3DSP (val) | 400 frames (20 shots) | Held-out evaluation |
 
-CrowdPose 14-keypoint annotations are mapped to the 3DSP 17-keypoint layout.
-Three joints (pelvis, spine, shoulder centre) are derived via spatial averaging.
-Filtering: iscrowd = 0, >= 8 visible keypoints, bbox >= 40x60 px.
+CrowdPose 14-keypoint annotations are mapped to the 3DSP 17-keypoint layout;
+pelvis, spine and shoulder centre are derived via spatial averaging of visible
+source joints. Filtering: iscrowd = 0, >= 8 visible keypoints,
+bbox >= 40x60 px. Augmentation: horizontal flip (p = 0.5) with left/right
+joint-pair permutation.
 
 ---
 
@@ -78,7 +83,6 @@ Filtering: iscrowd = 0, >= 8 visible keypoints, bbox >= 40x60 px.
 | Schedule | 1-epoch linear warmup + cosine decay to 0.1x |
 | Epochs / Batch | 12 / 8 |
 | Loss | Visibility-masked MSE on Gaussian heatmaps (sigma = 2.0) |
-| Augmentation | Horizontal flip (p = 0.5) with joint-pair swap |
 | Gradient clip | 1.0 |
 | Hardware | NVIDIA Tesla T4, 15.6 GB |
 | Duration | ~4.5 hours |
@@ -89,7 +93,7 @@ Best validation error: **3.04 px** at Epoch 3.
 
 ## Results
 
-**400 validation frames, 12 exact joints (limbs + shoulders):**
+**400 validation frames, 12 exact joints (limbs and shoulders):**
 
 | Model | Mean L2 (px) | Median L2 (px) |
 |-------|:------------:|:--------------:|
@@ -97,21 +101,40 @@ Best validation error: **3.04 px** at Epoch 3.
 | **Fine-tuned (ours)** | **3.59** | **2.05** |
 | **Improvement** | **-45.6%** | **-39.9%** |
 
+Per-joint reductions range from 29% (hips) to 53% (left shoulder); no
+evaluated joint regresses after fine-tuning.
+
 ### Training Curves
 
 ![Training Curves](assets/training_curves.png)
+
+*Training loss decreases monotonically over 12 epochs; validation error
+reaches its minimum of 3.04 px at epoch 3 (star), after which it plateaus.*
 
 ### Per-Joint Error
 
 ![Per-Joint Error](assets/per_joint_error.png)
 
+*Mean L2 error per joint over 400 validation frames. The green badges report
+the error reduction of the fine-tuned model relative to the COCO-pretrained
+baseline for each joint.*
+
 ### Qualitative Comparison (GT / Baseline / Fine-tuned)
 
 ![Qualitative](assets/qualitative_results.png)
 
+*Person-cropped held-out frames. The mean per-frame error over the 12 exact
+joints is printed above each prediction; the fine-tuned model tracks the
+ground-truth skeleton closely while the baseline shows clear joint
+displacement (e.g. 10.9 px vs 2.0 px in row 2).*
+
 ### Predicted Heatmaps
 
 ![Heatmaps](assets/heatmap_vis.png)
+
+*Inferno heatmaps for four representative joints (head, left wrist, right
+ankle, pelvis), cropped to the annotated person. Each distribution shows a
+single sharp, well-localised peak.*
 
 ---
 
@@ -119,7 +142,8 @@ Best validation error: **3.04 px** at Epoch 3.
 
 ```
 3DSP-ViTPose/
-|-- configs/default.py          All hyperparameters and keypoint definitions
+|-- configs/default.py          All hyperparameters, keypoint definitions,
+|                               and visualisation palette
 |-- data/
 |   |-- download.py             Clone 3DSP + download CrowdPose
 |   |-- crowdpose_preprocess.py Filter and remap CrowdPose to 17-kp
@@ -130,7 +154,7 @@ Best validation error: **3.04 px** at Epoch 3.
 |   +-- heatmap.py              Gaussian targets + soft-argmax
 |-- train.py                    Training loop
 |-- evaluate.py                 Baseline vs fine-tuned evaluation
-|-- visualize.py                Figure generation
+|-- visualize.py                Figure generation (reproduces assets/)
 |-- assets/                     Pre-generated plots (see above)
 |-- scripts/run_all.sh          End-to-end pipeline
 +-- requirements.txt
@@ -154,10 +178,17 @@ python train.py
 # Evaluate
 python evaluate.py --checkpoint checkpoints/vitpose_B_mix_best.pt
 
-# Generate figures
+# Regenerate all figures
 python visualize.py --checkpoint checkpoints/vitpose_B_mix_best.pt
 ```
 
-Model weights (~344 MB) are hosted on
-[GitHub Releases](https://github.com/alasaar/3DSP-ViTPose/releases/tag/v1.0.0)
-due to repository size limits.
+### Model Weights
+
+The fine-tuned checkpoint (~344 MB) exceeds GitHub's repository file limit and
+is hosted in GitHub Releases:
+
+```bash
+mkdir -p checkpoints
+wget -O checkpoints/vitpose_B_mix_best.pt \
+  "https://github.com/alasaar/3DSP-ViTPose/releases/download/v1.0.0/vitpose_B_mix_best.pt"
+```
