@@ -142,7 +142,7 @@ def frame_error(coords, gt):
 # ----------------------------------------------------------------------
 # Figure 1: qualitative comparison
 # ----------------------------------------------------------------------
-def plot_qualitative(mf, mb, processor, val_shots, device, n=4):
+def plot_qualitative(mf, mb, processor, val_shots, device, n=3):
     fig, axes = plt.subplots(n, 3, figsize=(9, 3.1 * n + 0.4))
     fig.suptitle("Qualitative Comparison on Held-Out 3DSP Frames",
                  fontsize=13, fontweight="bold")
